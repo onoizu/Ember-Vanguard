@@ -1,5 +1,5 @@
 """
-Ember Vanguard — Milestone 2 AI 接入
+Ember Vanguard — Milestone 3 战斗与检定
 GDD: AI 驱动的终端诡宅冒险 (克苏鲁风格)
 
 架构：节点图 (Node Graph) + 纯选项驱动
@@ -8,9 +8,11 @@ GDD: AI 驱动的终端诡宅冒险 (克苏鲁风格)
 
 import json
 import os
+import random
 import re
 import sys
-from typing import Dict, List, Optional
+import time
+from typing import Dict, List, Optional, Tuple
 
 try:
     import ollama
@@ -653,7 +655,23 @@ def _fallback_event(room_id: str) -> dict:
 
 
 # ─────────────────────────────────────────────
-# AI Pipeline (Milestone 2)
+# 检定系统 (Check System) — GDD §7 模块四
+# ─────────────────────────────────────────────
+
+def skill_check(stat_value: int, difficulty: int = 10) -> Tuple[bool, int]:
+    """
+    隐藏 D20 检定。
+    roll: 1-20 随机数；修正值 = stat_value // 3。
+    最终值 >= difficulty 即为成功。
+    返回 (是否成功, 最终值)。
+    """
+    roll      = random.randint(1, 20)
+    modified  = roll + (stat_value // 3)
+    return modified >= difficulty, modified
+
+
+# ─────────────────────────────────────────────
+# AI Pipeline (Milestone 2 / 3)
 # ─────────────────────────────────────────────
 
 class AIPipeline:
@@ -807,6 +825,154 @@ Rules:
             "is_cursed": is_cursed,
             "options":   options,
         }
+
+    # ── 行动结算 (Milestone 3) ────────────────────────────────
+
+    ACTION_SYSTEM_PROMPT = (
+        "You are the Dungeon Master of a Cthulhu Mythos tabletop RPG set in 1923 Arkham, New England.\n"
+        "Your tone is horrifying, restrained, and oppressive — like Lovecraft's prose.\n"
+        "The player has just taken an action. Based on their choice and the D20 roll result, determine the outcome.\n"
+        "\n"
+        "roll_result >= 10 means partial or full success (the action works, reduced harm).\n"
+        "roll_result < 10 means failure or backfire (the action worsens the situation, increases terror).\n"
+        "The lower the roll, the worse the consequence. A roll of 1-3 is catastrophic.\n"
+        "\n"
+        "You MUST respond with valid JSON only. No markdown. No code blocks. No explanation. Only the JSON object.\n"
+        "\n"
+        "Required JSON format:\n"
+        "{\n"
+        '  "narration": "<2-4 sentences in Chinese describing the outcome of the action, referencing the roll result implicitly>",\n'
+        '  "hp_delta": <integer, 0 or negative on failure, 0 or small positive on crit success, range -4 to 1>,\n'
+        '  "san_delta": <integer, usually negative on failure, range -4 to 1>,\n'
+        '  "new_item": <string item name in Chinese if an item is discovered, otherwise null>,\n'
+        '  "is_cursed": <true if new_item is a cursed artifact, false otherwise>\n'
+        "}\n"
+        "\n"
+        "Rules:\n"
+        "- narration must be in Chinese (Simplified), 2-4 sentences\n"
+        "- Do NOT include the options field — this response is for an action resolution, not room generation\n"
+        "- hp_delta and san_delta must be integers\n"
+        "- On success (roll >= 10): san_delta should be 0 or -1; hp_delta should be 0 or 1\n"
+        "- On failure (roll < 10): san_delta should be -1 to -3; hp_delta should be -1 to -3\n"
+        "- new_item is null unless the action specifically involves finding or taking something\n"
+        "- is_cursed is false if new_item is null"
+    )
+
+    def resolve_action(
+        self,
+        action_text: str,
+        room_name: str,
+        player_summary: dict,
+        roll_result: int,
+    ) -> dict:
+        """
+        根据玩家选择的行动和 D20 检定结果，调用 AI 裁定结果。
+        返回不含 options 字段的遭遇结果字典（narration + deltas + item）。
+        AI 调用失败时返回带惩罚的保底 Fallback。
+        """
+        if not _OLLAMA_AVAILABLE:
+            return self._action_fallback(roll_result)
+
+        success_label = "SUCCESS" if roll_result >= 10 else "FAILURE"
+        user_context = (
+            f"Room: {room_name}\n"
+            f"Player action: {action_text}\n"
+            f"D20 roll result: {roll_result} ({success_label})\n\n"
+            f"Player status:\n"
+            f"- Background: {player_summary['background']}\n"
+            f"- HP: {player_summary['hp']}/{player_summary['max_hp']}\n"
+            f"- Sanity: {player_summary['san']}/{player_summary['max_san']}\n"
+            f"- Curse level: {player_summary['curse_level']}\n"
+            f"- Inventory: {', '.join(player_summary['inventory']) if player_summary['inventory'] else 'empty'}\n"
+            f"- Recent events: {'; '.join(player_summary['key_events'][-3:]) if player_summary['key_events'] else 'none'}\n\n"
+            "Resolve the action outcome based on the roll result. Return JSON only."
+        )
+
+        try:
+            response = ollama.chat(
+                model="llama3.1:8b",
+                messages=[
+                    {"role": "system", "content": self.ACTION_SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_context},
+                ],
+                format="json",
+            )
+            raw_text = response["message"]["content"]
+            return self._parse_action_response(raw_text, roll_result)
+        except Exception:
+            return self._action_fallback(roll_result)
+
+    def _parse_action_response(self, raw_text: str, roll_result: int) -> dict:
+        """解析行动结算 AI 响应，剥离 Markdown，失败则返回保底。"""
+        text = raw_text.strip()
+        md_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if md_match:
+            text = md_match.group(1).strip()
+        if not text.startswith("{"):
+            brace_match = re.search(r"\{[\s\S]*\}", text)
+            if brace_match:
+                text = brace_match.group(0)
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return self._action_fallback(roll_result)
+
+        narration = data.get("narration")
+        if not isinstance(narration, str) or not narration.strip():
+            return self._action_fallback(roll_result)
+
+        try:
+            hp_delta = int(data.get("hp_delta", 0))
+        except (TypeError, ValueError):
+            hp_delta = 0
+
+        try:
+            san_delta = int(data.get("san_delta", 0))
+        except (TypeError, ValueError):
+            san_delta = 0
+
+        new_item  = data.get("new_item")
+        if not isinstance(new_item, str) or not new_item.strip():
+            new_item = None
+        is_cursed = bool(data.get("is_cursed", False))
+        if new_item is None:
+            is_cursed = False
+
+        return {
+            "narration": narration,
+            "hp_delta":  hp_delta,
+            "san_delta": san_delta,
+            "new_item":  new_item,
+            "is_cursed": is_cursed,
+        }
+
+    @staticmethod
+    def _action_fallback(roll_result: int) -> dict:
+        """AI 调用失败时的保底行动结果——依检定成败给予轻微惩罚。"""
+        if roll_result >= 10:
+            return {
+                "narration": (
+                    "DM 的意志被某种力量干扰了。\n"
+                    "你的动作未能得到任何回应，四周的空气变得更加沉重，\n"
+                    "但至少暂时没有更坏的事情发生。"
+                ),
+                "hp_delta":  0,
+                "san_delta": -1,
+                "new_item":  None,
+                "is_cursed": False,
+            }
+        else:
+            return {
+                "narration": (
+                    "DM 的意志被某种力量干扰了。\n"
+                    "你的举动触动了某些不该触动的东西——\n"
+                    "黑暗中传来低沉的回响，你感到理智在一点一点流失。"
+                ),
+                "hp_delta":  -1,
+                "san_delta": -2,
+                "new_item":  None,
+                "is_cursed": False,
+            }
 
     # ── AI 随机房间生成 (Milestone 2+) ───────────────────────
 
@@ -1167,11 +1333,11 @@ def render_full_map(engine: MapEngine, current_room_id: str) -> None:
         "kitchen":          (2, 5),
         # 地下入口（row 5）
         "cellar_door":      (1, 5),
+        "wine_cellar":      (2, 5),
         # 地下层（row 6）
-        "wine_cellar":      (2, 6),
         "ritual_room":      (1, 6),
+        "underground_lab":  (2, 6),
         # 最深地下（row 7）
-        "underground_lab":  (2, 7),
         "crypt":            (1, 7),
     }
 
@@ -1611,7 +1777,8 @@ def main() -> None:
                 None,
             )
             if matched is None:
-                input(f"  [!] 此方向没有通路，按 Enter 继续...")
+                print(f"\n  [!] 此方向没有通路。")
+                time.sleep(0.8)
                 continue
             selected = matched
         else:
@@ -1619,11 +1786,13 @@ def main() -> None:
             try:
                 choice = int(raw)
             except ValueError:
-                input("  [!] 请输入 wasd 移动，或输入数字选择行动，按 Enter 继续...")
+                print("\n  [!] 请输入 wasd 移动，或输入数字选择行动。")
+                time.sleep(0.8)
                 continue
 
             if choice < 1 or choice > len(unified_opts):
-                input(f"  [!] 请输入 1 ~ {len(unified_opts)} 之间的数字，按 Enter 继续...")
+                print(f"\n  [!] 请输入 1 ~ {len(unified_opts)} 之间的数字。")
+                time.sleep(0.8)
                 continue
 
             selected = unified_opts[choice - 1]
@@ -1631,12 +1800,58 @@ def main() -> None:
         # ── 处理行动选项 ───────────────────────
         if selected["type"] == "action":
             opt = selected["data"]
-            player.log_event(
-                f"在「{current_room['name']}」选择了: {opt['text']}"
+            player.log_event(f"在「{current_room['name']}」选择了: {opt['text']}")
+
+            # a. 执行 D20 检定（以当前 HP 作为体能/运气基准）
+            success, roll_val = skill_check(player.hp)
+
+            # b. 检定提示
+            clear_screen()
+            render_hud(player)
+            print(f"\n  ── 你选择了：{opt['text']}")
+            print(f"\n  ··· 正在检定命运 ···")
+            time.sleep(0.6)
+
+            # c. 调用 AI 裁定行动结果
+            result = ai.resolve_action(
+                action_text=opt["text"],
+                room_name=current_room["name"],
+                player_summary=player.to_summary(),
+                roll_result=roll_val,
             )
-            # Milestone 1：仅记录，不触发判定
-            # Milestone 3 起：skill_check + AI 意图解析 + apply_event_deltas
-            input("  [·] 你做出了选择。（Milestone 3 接入后此处将触发判定）按 Enter 继续...")
+
+            # d. 清屏，展示行动结果叙事
+            clear_screen()
+            render_hud(player)
+            outcome_label = "成功" if success else "失败"
+            print(f"\n  ── 检定结果：{roll_val} 点 [{outcome_label}]")
+            print()
+            print("  " + "·" * 54)
+            print()
+            for line in result["narration"].splitlines():
+                print(f"    {line}")
+            print()
+
+            # e. 应用数值变化（此处才真正触发 HP/SAN/物品变动）
+            apply_event_deltas(player, result)
+
+            # f. 死亡 / 发疯检测
+            if not player.is_alive():
+                render_hud(player)
+                print("\n  ██ 你倒下了。")
+                print("  庄园将你永远留在了这里。\n")
+                print("  [ 游戏结束 ]\n")
+                sys.exit(0)
+
+            if not player.is_sane():
+                render_hud(player)
+                print("\n  ██ 你的理智彻底崩溃。")
+                print("  你听见自己在笑，却无法停下来。\n")
+                print("  [ 游戏结束 — 融合·成为祭品 ]\n")
+                sys.exit(0)
+
+            # g. 暂停，然后继续主循环（显示当前房间选项）
+            input("  按 Enter 继续探索...")
 
         # ── 处理移动选项 ───────────────────────
         elif selected["type"] == "move":
@@ -1664,29 +1879,9 @@ def main() -> None:
             current_room  = engine.enter_room(player, target_id)
             current_event = ai.generate_room(current_room, player.to_summary())
 
-            # 进入新房间自动触发遭遇效果（Milestone 3 前的简化处理）
-            apply_event_deltas(player, current_event)
-
             # 记者背景：进入新房间额外记录碎片线索（GDD §2.2）
             if player.background == "journalist":
                 player.log_event(f"[线索] 于「{current_room['name']}」发现碎片线索")
-
-            # 死亡检测（简化版，Milestone 4 完善）
-            if not player.is_alive():
-                clear_screen()
-                render_hud(player)
-                print("\n  ██ 你倒下了。")
-                print("  庄园将你永远留在了这里。\n")
-                print("  [ 游戏结束 ]\n")
-                sys.exit(0)
-
-            if not player.is_sane():
-                clear_screen()
-                render_hud(player)
-                print("\n  ██ 你的理智彻底崩溃。")
-                print("  你听见自己在笑，却无法停下来。\n")
-                print("  [ 游戏结束 — 融合·成为祭品 ]\n")
-                sys.exit(0)
 
         # ── 处理退出 ───────────────────────────
         elif selected["type"] == "quit":
