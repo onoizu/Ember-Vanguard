@@ -404,8 +404,8 @@ INITIAL_ROOMS: Dict[str, dict] = {
         "visited": False,
         "connected_rooms": [
             {"room_id": "entrance_hall",  "direction": "向上 → 返回入口大厅",   "key": "w"},
-            {"room_id": "wine_cellar",    "direction": "向东 → 酒窖",           "key": "d"},
-            {"room_id": "ritual_room",    "direction": "深入 → 祭祀间",         "key": "s"},
+            {"room_id": "wine_cellar",    "direction": "向下 → 酒窖",           "key": "s"},
+            {"room_id": "ritual_room",    "direction": "向西 → 祭祀间",         "key": "a"},
         ],
     },
     "wine_cellar": {
@@ -417,8 +417,8 @@ INITIAL_ROOMS: Dict[str, dict] = {
         ),
         "visited": False,
         "connected_rooms": [
-            {"room_id": "cellar_door",    "direction": "向西 → 返回地窖入口",   "key": "a"},
-            {"room_id": "underground_lab","direction": "向南 → 隐秘的地下实验室","key": "s"},
+            {"room_id": "cellar_door",    "direction": "向上 → 返回地窖入口",   "key": "w"},
+            {"room_id": "underground_lab","direction": "向西 → 隐秘的地下实验室","key": "a"},
         ],
     },
     "ritual_room": {
@@ -431,9 +431,8 @@ INITIAL_ROOMS: Dict[str, dict] = {
         ),
         "visited": False,
         "connected_rooms": [
-            {"room_id": "cellar_door",    "direction": "向上 → 返回地窖入口",   "key": "w"},
-            {"room_id": "underground_lab","direction": "向东 → 地下实验室",     "key": "d"},
-            {"room_id": "crypt",          "direction": "向北 → 地下墓室",       "key": "a"},
+            {"room_id": "cellar_door",    "direction": "向东 → 返回地窖入口",   "key": "d"},
+            {"room_id": "underground_lab","direction": "向南 → 地下实验室",     "key": "s"},
         ],
     },
     "underground_lab": {
@@ -446,8 +445,9 @@ INITIAL_ROOMS: Dict[str, dict] = {
         ),
         "visited": False,
         "connected_rooms": [
-            {"room_id": "wine_cellar",    "direction": "向北 → 返回酒窖",       "key": "w"},
-            {"room_id": "ritual_room",    "direction": "向西 → 返回祭祀间",     "key": "a"},
+            {"room_id": "wine_cellar",    "direction": "向东 → 返回酒窖",       "key": "d"},
+            {"room_id": "ritual_room",    "direction": "向北 → 返回祭祀间",     "key": "w"},
+            {"room_id": "crypt",          "direction": "向下 → 地下墓室",       "key": "s"},
         ],
     },
     "crypt": {
@@ -460,8 +460,8 @@ INITIAL_ROOMS: Dict[str, dict] = {
         ),
         "visited": False,
         "connected_rooms": [
-            {"room_id": "ritual_room",    "direction": "向东 → 返回祭祀间",     "key": "d"},
-            {"room_id": "chapel",         "direction": "向上 → 礼拜堂",         "key": "w"},
+            {"room_id": "underground_lab","direction": "向上 → 返回地下实验室", "key": "w"},
+            {"room_id": "chapel",         "direction": "向东 → 礼拜堂",         "key": "d"},
         ],
     },
 }
@@ -1304,41 +1304,48 @@ def render_full_map(engine: MapEngine, current_room_id: str) -> None:
     彻底解决中文字符宽度导致的对齐问题。
     """
     # ── 房间布局：(grid_col, grid_row)，逻辑格坐标 ──────────
+    # col 说明：0=最西, 1=西, 2=中西, 3=中东, 4=东, 5=最东
+    # row 说明：0=最北(顶层), 递增向南
+    #
+    # 真实拓扑对应关系（以 entrance_hall 为坐标原点参考）：
+    #   servants_hall  在 entrance_hall 西 (col-1)
+    #   laundry_room   在 servants_hall 西 (col-2)  ← key=a
+    #   hidden_passage 在 servants_hall 北 (row-1)  ← key=w
+    #   hidden_passage 同时连到 study 东 (同 row)
     LAYOUT: dict[str, tuple[int, int]] = {
         # 最北层（row 0）
-        "water_tower":      (2, 0),
-        "chapel":           (0, 0),
+        "water_tower":      (3, 0),
+        "chapel":           (1, 0),
         # 北翼（row 1）
-        "garden_ruins":     (1, 1),
-        "observatory":      (3, 1),
-        "attic":            (2, 1),
-        "nursery":          (2, 1),   # 与 attic 同格，渲染时取第一个
+        "garden_ruins":     (2, 1),
+        "observatory":      (4, 1),
+        "attic":            (3, 1),
+        "nursery":          (3, 1),   # 与 attic 同格，渲染时取第一个
         # 二楼 / 北中（row 2）
-        "greenhouse":       (1, 2),
-        "master_bedroom":   (2, 2),
-        "guest_room":       (3, 2),
+        "greenhouse":       (2, 2),
+        "master_bedroom":   (3, 2),
+        "guest_room":       (4, 2),
         # 一楼（row 3）
-        "laundry_room":     (0, 3),
-        "library":          (1, 3),
-        "study":            (2, 3),
-        "music_room":       (3, 3),
-        "hidden_passage":   (0, 3),   # 同格取第一个
+        "hidden_passage":   (1, 3),   # servants_hall 正北，同列
+        "library":          (2, 3),
+        "study":            (3, 3),
+        "music_room":       (4, 3),
         # 一楼中央（row 4）
-        "servants_hall":    (0, 4),
-        "entrance_hall":    (1, 4),
-        "dining_room":      (2, 4),
-        "portrait_room":    (3, 4),
-        # 一楼南（row 5）
-        "pantry":           (3, 5),
-        "kitchen":          (2, 5),
-        # 地下入口（row 5）
-        "cellar_door":      (1, 5),
-        "wine_cellar":      (2, 5),
-        # 地下层（row 6）
-        "ritual_room":      (1, 6),
-        "underground_lab":  (2, 6),
+        "laundry_room":     (0, 4),   # servants_hall 正西，同行
+        "servants_hall":    (1, 4),
+        "entrance_hall":    (2, 4),
+        "dining_room":      (3, 4),
+        "portrait_room":    (4, 4),
+        # 一楼南（row 5）——左侧地下入口，右侧地面层，同行但列隔开
+        "ritual_room":      (1, 5),   # cellar_door 正西，同行
+        "cellar_door":      (2, 5),   # entrance_hall 正南，同列
+        "kitchen":          (3, 5),   # dining_room 正南，同列
+        "pantry":           (4, 5),   # portrait_room 正南，同列
+        # 地下层（row 6）——ritual_room 和 cellar_door 正南
+        "underground_lab":  (1, 6),   # ritual_room 正南，同列
+        "wine_cellar":      (2, 6),   # cellar_door 正南，同列
         # 最深地下（row 7）
-        "crypt":            (1, 7),
+        "crypt":            (1, 7),   # underground_lab 正南，同列
     }
 
     # 去重：同逻辑格只保留第一个，并动态加入 AI 生成的房间
@@ -1364,8 +1371,8 @@ def render_full_map(engine: MapEngine, current_room_id: str) -> None:
     # 中文房间名最长5个字=10显示宽，加"  "内边距=14，加左右框=16
     BOX_INNER_W = 14   # 框内可用显示宽度（含内边距）
     BOX_H       = 3    # 框高（行数）：顶边 + 名称行 + 底边
-    COL_GAP     = 3    # 相邻列之间的间隔（显示字符数）
-    ROW_GAP     = 1    # 相邻行之间的间隔（行数）
+    COL_GAP     = 5    # 相邻列之间的间隔（显示字符数）
+    ROW_GAP     = 2    # 相邻行之间的间隔（行数）
 
     BOX_TOTAL_W = BOX_INNER_W + 2   # 含左右框字符：16
 
@@ -1548,14 +1555,13 @@ def render_full_map(engine: MapEngine, current_room_id: str) -> None:
             gc2, gr2 = LAYOUT[target_id]
 
             if gc1 == gc2:
-                # 纯竖线：只在两框之间的空白行（不含框线本身）画 │
-                # 框线上的空缺已留空，视觉上自然形成通道
-                for r in range(min(r1, r2) + 1, max(r1, r2)):
+                # 纯竖线：包含两端锚点（框边上的空缺），使线接到门上
+                for r in range(min(r1, r2), max(r1, r2) + 1):
                     if canvas[r][c1] == " ":
                         _put(r, c1, "│")
             elif gr1 == gr2:
-                # 纯横线：只在两框之间的空白列画 ─（框线上的空缺留空）
-                for c in range(min(c1, c2) + 1, max(c1, c2)):
+                # 纯横线：包含两端锚点（框边上的空缺），使线接到门上
+                for c in range(min(c1, c2), max(c1, c2) + 1):
                     if canvas[r1][c] == " ":
                         _put(r1, c, "─")
             else:
